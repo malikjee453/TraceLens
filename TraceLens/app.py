@@ -51,6 +51,9 @@ with st.sidebar:
         key = st.text_input("Groq API key", type="password", help="Kept only in this browser session.")
     else:
         st.success("Groq key loaded from secrets")
+    deep = st.toggle("Deep-check anything not clearly real", value=True,
+                     help="Clearly real photos/videos are accepted after one fast pass. Everything else gets a "
+                          "second, slower pass on native-resolution crops.")
     model = st.text_input("Vision model", value=secret("GROQ_VISION_MODEL", DEFAULT_MODEL),
                           help="Must be a Groq model with image input and JSON mode.")
     n_frames = st.slider("Video frames to sample", 3, 12, 6)
@@ -83,7 +86,8 @@ def run(file) -> dict:
         if use_ai:
             status.write(f"Asking Groq ({model})")
             try:
-                verdict = analyse_with_groq(key, model, ai_images, res, signals, lean, res["media_type"])
+                verdict = analyse_with_groq(key, model, ai_images, res, signals, lean, res["media_type"],
+                                            deep_enabled=deep, progress=status.write)
             except AIError as e:
                 ai_error = str(e)
         status.update(label="Done", state="complete", expanded=False)
@@ -93,10 +97,10 @@ def run(file) -> dict:
 
 if up is not None:
     sig = (up.name, up.size)
-    if st.session_state.get("sig") != sig or st.session_state.get("ai_flag") != (use_ai, model):
+    if st.session_state.get("sig") != sig or st.session_state.get("ai_flag") != (use_ai, model, deep):
         try:
             st.session_state["out"] = run(up)
-            st.session_state["sig"], st.session_state["ai_flag"] = sig, (use_ai, model)
+            st.session_state["sig"], st.session_state["ai_flag"] = sig, (use_ai, model, deep)
         except Exception as e:
             st.session_state.pop("out", None)
             st.error(f"Analysis failed: {e}")
@@ -113,6 +117,14 @@ if up is not None:
             if v:
                 st.subheader(f"{ICON[v['category']]} {CATEGORY_LABELS[v['category']]}")
                 st.progress(v["confidence"] / 100, text=f"Confidence {v['confidence']}/100 (calibrated, capped)")
+                stage = v.get("stage")
+                if stage == "fast":
+                    st.success("⚡ Recognised as a real camera capture on the fast pass.")
+                elif stage == "deep":
+                    st.info("🔬 Not clearly real on the fast pass, so a deep second pass was run.")
+                    fp = v.get("first_pass")
+                    if fp:
+                        st.caption(f"Fast pass said: {CATEGORY_LABELS[fp['category']]} ({fp['confidence']}).")
                 st.write(v["summary"])
                 if v.get("generation_method_guess"):
                     st.info(v["generation_method_guess"])

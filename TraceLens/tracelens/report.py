@@ -41,7 +41,7 @@ def build_html(res: dict, signals: list, lean: dict, verdict: dict | None,
     v_html = "<p><i>AI assessment was not run (local-only mode).</i></p>"
     if verdict:
         v_html = (f"<h2>Assessment: {E(CATEGORY_LABELS[verdict['category']])} "
-                  f"<small>(confidence {verdict['confidence']}/100)</small></h2><p>{E(verdict['summary'])}</p>"
+                  f"<small>(confidence {verdict['confidence']}/100, {E(str(verdict.get('stage', '')))} pass)</small></h2><p>{E(verdict['summary'])}</p>"
                   + (f"<p><b>Method guess:</b> {E(verdict['generation_method_guess'])}</p>" if verdict.get("generation_method_guess") else "")
                   + "<h3>Visual observations</h3>" + _ul(verdict["visual_observations"])
                   + "<h3>Evidence for camera capture</h3>" + _ul(verdict["evidence_for_camera"])

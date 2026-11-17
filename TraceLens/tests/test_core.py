@@ -30,9 +30,24 @@ def test_ai_metadata_overrides_model():
     assert v["category"] == "ai_generated"
 
 
-def test_camera_claim_without_metadata_is_capped():
-    v = apply_guardrails(normalise({"category": "camera_capture", "is_photographic": True, "confidence": 98}), [])
-    assert v["confidence"] <= 70
+def _cam(conf=98):
+    return normalise({"category": "camera_capture", "is_photographic": True, "confidence": conf})
+
+
+def _sig(i, d, w):
+    return {"id": i, "direction": d, "weight": w, "label": i, "why": ""}
+
+
+def test_camera_claim_caps_scale_with_evidence():
+    assert apply_guardrails(_cam(), [])["confidence"] == 70
+    assert apply_guardrails(_cam(), [_sig("shot_noise", "camera", 1.2)])["confidence"] == 85
+    assert apply_guardrails(_cam(), [_sig("camera_make", "camera", 3)])["confidence"] == 90
+    assert apply_guardrails(_cam(), [_sig("camera_make", "camera", 3), _sig("shooting_params", "camera", 2)])["confidence"] == 95
+
+
+def test_graphic_signal_blocks_high_camera_confidence():
+    v = apply_guardrails(_cam(), [_sig("shot_noise", "camera", 1.2), _sig("flat_graphic", "graphic", 2)])
+    assert v["confidence"] == 70
 
 
 def test_json_extraction():

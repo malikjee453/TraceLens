@@ -118,6 +118,18 @@ def jpeg_quant_info(im: Image.Image) -> dict:
 
 
 
+def _exif_thumbnail(data: bytes) -> bool:
+    """Cameras embed a small JPEG thumbnail inside APP1/EXIF; most generators do not."""
+    if data[:2] != b"\xff\xd8":
+        return False
+    i = data.find(b"Exif\x00\x00", 0, 70000)
+    if i < 0:
+        return False
+    end = data.find(b"\xff\xdb", i)               # first DQT after the EXIF header
+    seg = data[i: end if end > 0 else i + 65000]
+    return seg.count(b"\xff\xd8") >= 1
+
+
 # ---------------------------------------------------------------- pixel analyses
 def _gray(im: Image.Image, max_side: int = 1024) -> np.ndarray:
     g = im.convert("L")
@@ -173,6 +185,69 @@ def noise_analysis(im: Image.Image) -> dict:
         "noise_vs_brightness_corr": round(corr, 3),
         "flat_block_fraction": round(flat, 3),
     }
+
+
+def sensor_analysis(im: Image.Image) -> dict:
+    """Camera-sensor fingerprints (UNVALIDATED thresholds - calibrate with eval/run_eval.py).
+    shot noise: noise variance grows with brightness; CFA: demosaicing leaves a period-2 pattern
+    in the residual of un-resized photos; channel noise correlation after demosaicing."""
+    from scipy.ndimage import gaussian_filter, uniform_filter
+    out: dict = {}
+    rgb = im.convert("RGB")
+    if max(rgb.size) > 1280:                       # keep it cheap; noise stats survive mild downscale poorly,
+        sc = 1280 / max(rgb.size)                  # so CFA below always uses a native-resolution crop
+        small = rgb.resize((int(rgb.width * sc), int(rgb.height * sc)), Image.LANCZOS)
+    else:
+        small = rgb
+    a = np.asarray(small, dtype=np.float32)
+    g = a.mean(axis=2)
+    resid = g - gaussian_filter(g, 1.2)
+    b = 16
+    h, w = (g.shape[0] // b) * b, (g.shape[1] // b) * b
+    def blocks(x): return x[:h, :w].reshape(h // b, b, w // b, b).swapaxes(1, 2).reshape(-1, b * b)
+    mean_b, var_b = blocks(g).mean(1), blocks(resid).var(1)
+    tex = blocks(gaussian_filter(g, 2.0)).std(1)           # low-frequency texture inside the block
+    sel = (tex < np.percentile(tex, 45)) & (mean_b > 20) & (mean_b < 235)
+    out["smooth_blocks"] = int(sel.sum())
+    if sel.sum() >= 25 and mean_b[sel].std() > 3 and var_b[sel].std() > 1e-6:
+        out["noise_mean_var_corr"] = round(float(np.corrcoef(mean_b[sel], var_b[sel])[0, 1]), 3)
+    if sel.sum() >= 25:
+        rr = [blocks(a[..., c] - gaussian_filter(a[..., c], 1.2))[sel] for c in range(3)]
+        if rr[0].std() > 1e-6 and rr[1].std() > 1e-6:
+            out["channel_noise_corr"] = round(float(np.corrcoef(rr[0].ravel(), rr[1].ravel())[0, 1]), 3)
+    # CFA / demosaicing periodicity on a native-resolution centre crop (no resampling)
+    n = 512
+    if min(rgb.size) >= n:
+        x0, y0 = (rgb.width - n) // 2, (rgb.height - n) // 2
+        cg = np.asarray(rgb.crop((x0, y0, x0 + n, y0 + n)), dtype=np.float32)[..., 1]
+        cr = cg - gaussian_filter(cg, 1.0)
+        F = np.abs(np.fft.fft2(cr))
+        peaks = [F[n // 2, n // 2], F[n // 2, 0], F[0, n // 2]]
+        base = np.median(F[n // 4: n // 2, n // 4: n // 2]) + 1e-6
+        out["cfa_peak_ratio"] = round(float(max(peaks) / base), 2)
+    return out
+
+
+def detail_crops(im: Image.Image, n: int = 2, size: int = 768) -> list:
+    """Native-resolution crops of the most detailed regions, for the deep second pass."""
+    from scipy.ndimage import gaussian_filter
+    rgb = im.convert("RGB")
+    size = min(size, min(rgb.size))
+    g = np.asarray(rgb.convert("L"), dtype=np.float32)
+    lap = np.abs(g - gaussian_filter(g, 1.5))
+    step = max(size // 2, 64)
+    cands = []
+    for y in range(0, max(rgb.height - size, 0) + 1, step):
+        for x in range(0, max(rgb.width - size, 0) + 1, step):
+            cands.append((float(lap[y:y + size, x:x + size].mean()), x, y))
+    cands.sort(reverse=True)
+    chosen: list = []
+    for _, x, y in cands:
+        if all(abs(x - cx) >= size // 2 or abs(y - cy) >= size // 2 for cx, cy in chosen):
+            chosen.append((x, y))
+        if len(chosen) == n:
+            break
+    return [rgb.crop((x, y, x + size, y + size)) for x, y in chosen]
 
 
 def frequency_analysis(im: Image.Image) -> dict:
@@ -231,12 +306,15 @@ def analyze_image(data: bytes, filename: str) -> tuple:
     }
     exif = read_exif(im)
     res["exif"] = exif
+    res["exif_tag_count"] = len(exif)
+    res["exif_thumbnail_present"] = _exif_thumbnail(data)
     res["png_text_chunks"] = {k: str(v)[:400] for k, v in (getattr(im, "text", {}) or {}).items()}
     res["provenance"] = scan_provenance(data)
     res["dimension_hints"] = dimension_hints(im.width, im.height)
     res["jpeg"] = jpeg_quant_info(im)
     res["noise"] = noise_analysis(im)
     res["frequency"] = frequency_analysis(im)
+    res["sensor"] = sensor_analysis(im)
     res["stylization"] = stylization_analysis(im)
     ela_img = None
     if fmt == "JPEG":

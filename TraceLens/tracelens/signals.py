@@ -14,6 +14,10 @@ def _s(sid, label, direction, weight, why):
     return {"id": sid, "label": label, "direction": direction, "weight": weight, "why": why}
 
 
+# Pixel-statistics camera signals: weaker than metadata, so the guardrails treat them separately.
+PIXEL_CAMERA_IDS = {"natural_noise", "shot_noise", "cfa"}
+
+
 def image_signals(r: dict) -> list[dict]:
     out: list[dict] = []
     exif, prov = r.get("exif", {}), r.get("provenance", {})
@@ -55,6 +59,12 @@ def image_signals(r: dict) -> list[dict]:
                       "Proprietary camera block; rarely preserved by generators or editors."))
     if any(k.startswith("GPS.") for k in exif):
         out.append(_s("gps", "GPS data present", "camera", 1, "Usually from a phone/camera; also forgeable."))
+    if r.get("exif_tag_count", 0) >= 25:
+        out.append(_s("exif_rich", f"Rich EXIF block ({r['exif_tag_count']} tags)", "camera", 1,
+                      "Camera/phone files carry many tags; editors and generators usually keep few."))
+    if r.get("exif_thumbnail_present"):
+        out.append(_s("exif_thumb", "Embedded EXIF thumbnail", "camera", 0.7,
+                      "Cameras embed a thumbnail; generators rarely do (some editors keep it)."))
     sw = str(exif.get("Software", "")).strip()
     if sw:
         low = sw.lower()
@@ -104,6 +114,16 @@ def image_signals(r: dict) -> list[dict]:
               and 0.2 <= n.get("block_noise_cv", 0) <= 1.3):
             out.append(_s("natural_noise", "Spatially varying fine-grain noise", "camera", 0.8,
                           "Weak: textured scenes and some generators also look like this."))
+    sn = r.get("sensor", {})
+    corr = sn.get("noise_mean_var_corr")
+    if corr is not None and corr > 0.3 and sn.get("smooth_blocks", 0) >= 25:
+        out.append(_s("shot_noise", "Noise grows with brightness (sensor shot-noise pattern)", "camera", 1.2,
+                      f"corr={corr} over {sn['smooth_blocks']} smooth blocks. Physically typical of sensors; "
+                      "thresholds are unvalidated and heavy denoising removes it."))
+        if sn.get("cfa_peak_ratio", 0) > 3.5:
+            out.append(_s("cfa", "Demosaicing (colour-filter) periodicity", "camera", 0.6,
+                          f"peak ratio={sn['cfa_peak_ratio']}. Only counted because shot-noise also agrees; "
+                          "dotted/halftone graphics can fake this alone."))
     if fr.get("spectral_peak_score", 0) > 9:
         out.append(_s("spectral_peaks", "Periodic peaks in frequency spectrum", "generated", 1,
                       f"peak score {fr['spectral_peak_score']}; resizing/compression can cause this too."))
