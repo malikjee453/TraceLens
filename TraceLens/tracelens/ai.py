@@ -12,7 +12,6 @@ from PIL import Image
 
 FAST_ACCEPT = 80                        # stop early when a camera verdict reaches this (after guardrails)
 DEFAULT_MODEL = "qwen/qwen3.8-27b"      # Groq vision model with JSON mode (max 3 images/request)
-FALLBACK_MODELS = ["qwen/qwen3.6-27b"]
 MAX_IMAGES = 3
 CATEGORIES = ["camera_capture", "ai_generated", "illustration_or_graphic", "edited_or_composite", "uncertain"]
 CATEGORY_LABELS = {
@@ -126,7 +125,9 @@ def to_data_url(im: Image.Image, max_side: int = 1280, quality: int = 85) -> str
 
 # ---------------------------------------------------------------- Groq call
 class AIError(RuntimeError):
-    pass
+    def __init__(self, msg, details=None):
+        super().__init__(msg)
+        self.details = details or []
 
 
 def _extract_json(text: str) -> dict:
@@ -162,37 +163,59 @@ def call_groq(api_key: str, model: str, images: list[Image.Image], evidence: str
         {"type": "image_url", "image_url": {"url": to_data_url(i, max_side=1600 if deep and k == 0 else 1280)}}
         for k, i in enumerate(imgs)]
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
-    attempts = [  # progressively simpler parameter sets in case a model rejects one
-        dict(temperature=0.2, max_completion_tokens=2500, response_format={"type": "json_object"},
+    # Thinking models can spend the whole budget on reasoning and return empty content, so the budget is
+    # generous and later attempts switch reasoning off.
+    attempts = [
+        dict(temperature=0.2, max_completion_tokens=8000, response_format={"type": "json_object"},
              reasoning_effort=effort, reasoning_format="hidden"),
-        dict(temperature=0.2, max_completion_tokens=2500, response_format={"type": "json_object"}),
-        dict(temperature=0.2, max_completion_tokens=2500),
+        dict(temperature=0.2, max_completion_tokens=6000, response_format={"type": "json_object"},
+             reasoning_effort="none"),
+        dict(temperature=0.2, max_completion_tokens=6000, reasoning_effort="none"),
+        dict(temperature=0.2, max_completion_tokens=6000),
     ]
-    last: Exception | None = None
-    for m in [model] + [x for x in FALLBACK_MODELS if x != model]:
-        for params in attempts:
-            for retry in range(3):
-                try:
-                    t0 = time.time()
-                    out = client.chat.completions.create(model=m, messages=messages, **params)
-                    raw = out.choices[0].message.content
-                    data = _extract_json(raw)
-                    meta = {"model": m, "seconds": round(time.time() - t0, 1),
-                            "usage": getattr(out, "usage", None) and out.usage.model_dump()}
-                    return data, meta
-                except RateLimitError as e:
-                    last = e
-                    time.sleep(2 * (retry + 1))
-                    continue
-                except APIConnectionError as e:
-                    raise AIError(f"Could not reach Groq: {e}") from e
-                except (APIStatusError, json.JSONDecodeError, AIError) as e:
-                    last = e
-                    status = getattr(e, "status_code", None)
-                    if status in (401, 403):
-                        raise AIError("Groq rejected the API key (401/403). Check GROQ_API_KEY.") from e
-                    break  # try next parameter set / model
-    raise AIError(f"Groq analysis failed: {last}")
+    log: list[str] = []
+    for n, params in enumerate(attempts, 1):
+        for retry in range(3):
+            try:
+                t0 = time.time()
+                out = client.chat.completions.create(model=model, messages=messages, **params)
+                ch = out.choices[0]
+                raw = ch.message.content
+                if not (raw or "").strip():
+                    raise AIError(f"empty reply (finish_reason={ch.finish_reason}; the model probably used its "
+                                  "whole token budget on reasoning)")
+                data = _extract_json(raw)
+                meta = {"model": model, "seconds": round(time.time() - t0, 1), "attempt": n,
+                        "usage": getattr(out, "usage", None) and out.usage.model_dump()}
+                return data, meta
+            except RateLimitError as e:
+                log.append(f"attempt {n}: rate limited ({e})")
+                time.sleep(2 * (retry + 1))
+                continue
+            except APIConnectionError as e:
+                raise AIError(f"Could not reach Groq: {e}", log) from e
+            except APIStatusError as e:
+                status = getattr(e, "status_code", None)
+                log.append(f"attempt {n}: HTTP {status}: {e}")
+                if status in (401, 403):
+                    raise AIError("Groq rejected the API key or this model is not allowed for it "
+                                  f"(HTTP {status}). Check GROQ_API_KEY and the model name.", log) from e
+                if status == 404:
+                    ids = _list_models(client)
+                    raise AIError(f"Model '{model}' was not found for this key (HTTP 404)."
+                                  + (f" Models this key can use: {', '.join(ids[:40])}." if ids else ""), log) from e
+                break           # 400 etc.: try the next, simpler parameter set
+            except (json.JSONDecodeError, AIError, TypeError) as e:
+                log.append(f"attempt {n}: {type(e).__name__}: {e}")
+                break
+    raise AIError("Groq analysis failed. First error: " + (log[0] if log else "unknown"), log)
+
+
+def _list_models(client) -> list[str]:
+    try:
+        return sorted(m.id for m in client.models.list().data)
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------- validation + guardrails

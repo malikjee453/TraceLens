@@ -89,7 +89,7 @@ def run(file) -> dict:
                 verdict = analyse_with_groq(key, model, ai_images, res, signals, lean, res["media_type"],
                                             deep_enabled=deep, progress=status.write)
             except AIError as e:
-                ai_error = str(e)
+                ai_error = (str(e), e.details)
         status.update(label="Done", state="complete", expanded=False)
     return {"res": res, "signals": signals, "lean": lean, "verdict": verdict, "ai_error": ai_error,
             "preview": preview, "ela": ela_img, "frames": ai_images if is_video else []}
@@ -131,7 +131,10 @@ if up is not None:
                 for n in v.get("guardrail_notes", []):
                     st.warning(n)
             elif out["ai_error"]:
-                st.error(out["ai_error"])
+                st.error(out["ai_error"][0])
+                if out["ai_error"][1]:
+                    with st.expander("Technical details (every attempt)"):
+                        st.code("\n".join(out["ai_error"][1]))
                 st.caption("Local measurements below are still valid.")
             else:
                 st.info("AI assessment is off. Showing local measurements only.")
