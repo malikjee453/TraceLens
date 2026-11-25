@@ -1,4 +1,5 @@
 # TraceLens Forensics 2.0 
+created by : Engr. Mubashir Malik
 
 Camera capture vs. computer-generated (AI / illustration / render) triage for images and videos.
 
