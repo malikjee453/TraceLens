@@ -32,6 +32,9 @@ streamlit run app.py
 ## Model
 Default `qwen/qwen3.8-27b` (the only public Groq vision model in the docs when this was written; JSON mode, max 3 images/request). If you see a 404, the error message lists the models your key can actually use. It is a *preview* model; if Groq retires it, set `GROQ_VISION_MODEL` in secrets or edit the sidebar field. Check https://console.groq.com/docs/vision for current vision models.
 
+## Groq free-tier limits
+The default model allows **7,000 input tokens per minute** on the free tier, and every image costs ~2,048 tokens. The app therefore keeps prompts short, sends one image (videos: one contact sheet of the sampled frames), paces the fast and deep passes (the deep pass may wait up to a minute), and learns the real limit from Groq's error message. If you upgrade your Groq plan, set `GROQ_ITPM_LIMIT` in secrets so deep passes can use more images without waiting.
+
 ## Privacy
 Files are handled in memory and not stored by the app. With AI on, a downscaled image and a metadata summary are sent to Groq (GPS coordinates and file paths are withheld). Use the sidebar toggle for local-only measurements.
 

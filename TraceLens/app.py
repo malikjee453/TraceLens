@@ -7,7 +7,7 @@ import streamlit as st
 from PIL import Image
 
 from tracelens import APP_NAME, VERSION
-from tracelens.ai import CATEGORY_LABELS, DEFAULT_MODEL, AIError, analyse_with_groq
+from tracelens.ai import CATEGORY_LABELS, DEFAULT_MODEL, GOVERNOR, AIError, analyse_with_groq
 from tracelens.imaging import analyze_image
 from tracelens.report import build_html, build_json
 from tracelens.signals import image_signals, leaning, video_signals
@@ -27,6 +27,12 @@ def secret(name, default=""):
     except Exception:           # no secrets.toml present
         return os.environ.get(name, default)
 
+
+# Groq free tier: 7000 input tokens/min for the default model. Raise this after upgrading your Groq plan.
+try:
+    GOVERNOR.limit = int(secret("GROQ_ITPM_LIMIT", GOVERNOR.limit))
+except ValueError:
+    pass
 
 # ------------------------------------------------------------------ optional password gate
 pw = secret("APP_PASSWORD")
